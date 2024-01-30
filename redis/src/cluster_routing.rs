@@ -8,7 +8,7 @@ use rand::thread_rng;
 use crate::cmd::{Arg, Cmd};
 use crate::commands::is_readonly_cmd;
 use crate::types::Value;
-use crate::{ErrorKind, RedisResult};
+use crate::{ErrorKind, RedisError, RedisResult};
 
 pub(crate) const SLOT_SIZE: u16 = 16384;
 
@@ -548,7 +548,7 @@ pub enum SlotAddr {
 /// which stores only the master and [optional] replica
 /// to avoid the need to choose a replica each time
 /// a command is executed
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct SlotAddrs([String; 2]);
 
 impl SlotAddrs {
@@ -595,6 +595,23 @@ pub(crate) struct SlotMap(BTreeMap<u16, SlotAddrs>);
 impl SlotMap {
     pub fn new() -> Self {
         Self(BTreeMap::new())
+    }
+
+    pub fn get_slot(&self, hash: u16) -> RedisResult<(u16, SlotAddrs)> {
+
+        let mut res: Option<(u16, SlotAddrs)> = None;
+
+        for (key, value) in self.0.iter() {
+            if &hash < key {
+                res = Some((key.to_owned(), value.clone()));
+                break;
+            }
+        }
+
+        res.ok_or_else(|| RedisError::from(
+            (ErrorKind::ClusterDown, 
+            "Unable to get slot range for given channel hash")
+        ))
     }
 
     pub fn from_slots(slots: &[Slot], read_from_replicas: bool) -> Self {

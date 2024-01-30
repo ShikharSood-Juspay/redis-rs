@@ -1331,7 +1331,9 @@ where
 /// # }
 /// ```
 impl<'a> PubSub<'a> {
-    fn new(con: &'a mut Connection) -> Self {
+    /// For cluster redis pubsub support, a new pubsub connection will be established to subscribe to
+    /// a particular node. 
+    pub fn new(con: &'a mut Connection) -> Self {
         Self {
             con,
             waiting_messages: VecDeque::new(),

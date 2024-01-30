@@ -36,6 +36,8 @@
 //!     .query(&mut connection).unwrap();
 //! ```
 use std::cell::RefCell;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::iter::Iterator;
 use std::str::FromStr;
 use std::thread;
@@ -51,12 +53,12 @@ use crate::connection::{
 };
 use crate::parser::parse_redis_value;
 use crate::types::{ErrorKind, HashMap, RedisError, RedisResult, Value};
-use crate::IntoConnectionInfo;
 pub use crate::TlsMode; // Pub for backwards compatibility
 use crate::{
     cluster_client::ClusterParams,
     cluster_routing::{Redirect, Route, RoutingInfo, Slot, SlotMap, SLOT_SIZE},
 };
+use crate::{FromRedisValue, IntoConnectionInfo, ToRedisArgs};
 use rand::{seq::IteratorRandom, thread_rng, Rng};
 
 pub use crate::cluster_client::{ClusterClient, ClusterClientBuilder};
@@ -212,6 +214,49 @@ pub struct ClusterConnection<C = Connection> {
     read_timeout: RefCell<Option<Duration>>,
     write_timeout: RefCell<Option<Duration>>,
     cluster_params: ClusterParams,
+}
+
+impl ClusterConnection<Connection> {
+    /// Subscribe to a given channel.
+    /// The node for the channel is determined using channel hash.
+    /// It is recommended that small payload size be used with high cardinality set for channel name.
+    pub fn subscribe<T: ToRedisArgs, R: FromRedisValue>(
+        &mut self,
+        channel: T,
+        duration: Duration,
+    ) -> RedisResult<R> {
+        // Get a slot number
+        let mut s = DefaultHasher::new();
+        let channel_vec: Vec<u8> = channel.to_redis_args().into_iter().flatten().collect();
+        channel_vec.hash(&mut s);
+        let long = s.finish();
+        let slot: u16 = (long % 16384)
+                        .try_into()
+                        .map_err(|_| {
+                            RedisError::from((
+                                ErrorKind::ClusterDown,
+                                "Unable to find a valid slot range for given channel hash",
+                            ))})?;
+
+        let slots = self.slots.borrow();
+        let (_, slot_addrs) = slots.get_slot(slot)?;
+        let master_connection_addr = slot_addrs.slot_addr(&SlotAddr::Master);
+        let mut conn_map = self.connections.borrow_mut();
+        let conn = conn_map.get_mut(master_connection_addr).ok_or_else(|| {
+            RedisError::from((
+                ErrorKind::ClusterDown,
+                "Unable to find node connection for given slot range",
+            ))
+        })?;
+
+        let mut pubsub = conn.as_pubsub();
+
+        pubsub.set_read_timeout(Some(duration))?;
+        pubsub.subscribe(channel)?;
+
+        let msg = pubsub.get_message()?;
+        msg.get_payload()
+    }
 }
 
 impl<C> ClusterConnection<C>
