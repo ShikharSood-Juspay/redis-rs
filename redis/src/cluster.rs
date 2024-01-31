@@ -58,7 +58,7 @@ use crate::{
     cluster_client::ClusterParams,
     cluster_routing::{Redirect, Route, RoutingInfo, Slot, SlotMap, SLOT_SIZE},
 };
-use crate::{FromRedisValue, IntoConnectionInfo, ToRedisArgs};
+use crate::{ControlFlow, FromRedisValue, IntoConnectionInfo, Msg, PubSubCommands, ToRedisArgs};
 use rand::{seq::IteratorRandom, thread_rng, Rng};
 
 pub use crate::cluster_client::{ClusterClient, ClusterClientBuilder};
@@ -256,6 +256,44 @@ impl ClusterConnection<Connection> {
 
         let msg = pubsub.get_message()?;
         msg.get_payload()
+    }
+
+    /// Must only subscribe to a single channel
+    /// Haven't tested work flow for multi channel subscription
+    pub fn persistent_subscribe<C, F, U>(
+        &mut self,
+        channels: C,
+        func: F
+    ) -> RedisResult<U>
+    where
+        F: FnMut(Msg) -> ControlFlow<U>,
+        C: ToRedisArgs, 
+    {
+        // Get a slot number
+        let mut s = DefaultHasher::new();
+        let channel_vec: Vec<u8> = channels.to_redis_args().into_iter().flatten().collect();
+        channel_vec.hash(&mut s);
+        let long = s.finish();
+        let slot: u16 = (long % 16384)
+                        .try_into()
+                        .map_err(|_| {
+                            RedisError::from((
+                                ErrorKind::ClusterDown,
+                                "Unable to find a valid slot range for given channel hash",
+                            ))})?;
+
+        let slots = self.slots.borrow();
+        let (_, slot_addrs) = slots.get_slot(slot)?;
+        let master_connection_addr = slot_addrs.slot_addr(&SlotAddr::Master);
+        let mut conn_map = self.connections.borrow_mut();
+        let conn = conn_map.get_mut(master_connection_addr).ok_or_else(|| {
+            RedisError::from((
+                ErrorKind::ClusterDown,
+                "Unable to find node connection for given slot range",
+            ))
+        })?;
+
+        conn.subscribe(channels, func)
     }
 }
 
