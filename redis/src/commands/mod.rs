@@ -1,5 +1,8 @@
 // can't use rustfmt here because it screws up the file.
 #![cfg_attr(rustfmt, rustfmt_skip)]
+use std::time::Duration;
+
+use crate::cluster::ClusterConnection;
 use crate::cmd::{cmd, Cmd, Iter};
 use crate::connection::{Connection, ConnectionLike, Msg};
 use crate::pipeline::Pipeline;
@@ -1928,7 +1931,7 @@ pub trait PubSubCommands: Sized {
     /// For every `Msg` passed to the provided closure, either
     /// `ControlFlow::Break` or `ControlFlow::Continue` must be returned. This
     /// method will not return until `ControlFlow::Break` is observed.
-    fn subscribe<C, F, U>(&mut self, _: C, _: F) -> RedisResult<U>
+    fn subscribe<C, F, U>(&mut self, _: C, _: F, dur: Option<Duration>) -> RedisResult<U>
     where
         F: FnMut(Msg) -> ControlFlow<U>,
         C: ToRedisArgs;
@@ -1939,7 +1942,7 @@ pub trait PubSubCommands: Sized {
     /// For every `Msg` passed to the provided closure, either
     /// `ControlFlow::Break` or `ControlFlow::Continue` must be returned. This
     /// method will not return until `ControlFlow::Break` is observed.
-    fn psubscribe<P, F, U>(&mut self, _: P, _: F) -> RedisResult<U>
+    fn psubscribe<P, F, U>(&mut self, _: P, _: F, dur: Option<Duration>) -> RedisResult<U>
     where
         F: FnMut(Msg) -> ControlFlow<U>,
         P: ToRedisArgs;
@@ -1951,12 +1954,13 @@ impl<T> Commands for T where T: ConnectionLike {}
 impl<T> AsyncCommands for T where T: crate::aio::ConnectionLike + Send + Sized {}
 
 impl PubSubCommands for Connection {
-    fn subscribe<C, F, U>(&mut self, channels: C, mut func: F) -> RedisResult<U>
+    fn subscribe<C, F, U>(&mut self, channels: C, mut func: F, dur: Option<Duration>) -> RedisResult<U>
     where
         F: FnMut(Msg) -> ControlFlow<U>,
         C: ToRedisArgs,
     {
         let mut pubsub = self.as_pubsub();
+        pubsub.set_read_timeout(dur)?;
         pubsub.subscribe(channels)?;
 
         loop {
@@ -1968,12 +1972,13 @@ impl PubSubCommands for Connection {
         }
     }
 
-    fn psubscribe<P, F, U>(&mut self, patterns: P, mut func: F) -> RedisResult<U>
+    fn psubscribe<P, F, U>(&mut self, patterns: P, mut func: F,  dur: Option<Duration>) -> RedisResult<U>
     where
         F: FnMut(Msg) -> ControlFlow<U>,
         P: ToRedisArgs,
     {
         let mut pubsub = self.as_pubsub();
+        pubsub.set_read_timeout(dur)?;
         pubsub.psubscribe(patterns)?;
 
         loop {
@@ -1983,6 +1988,24 @@ impl PubSubCommands for Connection {
                 ControlFlow::Break(value) => return Ok(value),
             }
         }
+    }
+}
+
+impl PubSubCommands for ClusterConnection<Connection> {
+    fn subscribe<C, F, U>(&mut self, channels: C, mut func: F,  dur: Option<Duration>) -> RedisResult<U>
+    where
+        F: FnMut(Msg) -> ControlFlow<U>,
+        C: ToRedisArgs,
+    {
+        self.persistent_subscribe(channels, func, dur)
+    }
+
+    fn psubscribe<P, F, U>(&mut self, patterns: P, mut func: F, dur: Option<Duration>) -> RedisResult<U>
+    where
+        F: FnMut(Msg) -> ControlFlow<U>,
+        P: ToRedisArgs,
+    {
+        self.persistent_psubscribe(patterns, func, dur)
     }
 }
 

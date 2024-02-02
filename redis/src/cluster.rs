@@ -263,7 +263,8 @@ impl ClusterConnection<Connection> {
     pub fn persistent_subscribe<C, F, U>(
         &mut self,
         channels: C,
-        func: F
+        mut func: F,
+        dur: Option<Duration>
     ) -> RedisResult<U>
     where
         F: FnMut(Msg) -> ControlFlow<U>,
@@ -292,8 +293,46 @@ impl ClusterConnection<Connection> {
                 "Unable to find node connection for given slot range",
             ))
         })?;
+        
+        conn.subscribe(channels, func, dur)
+    }
 
-        conn.subscribe(channels, func)
+    /// This function will subscribe to a pattern
+    pub fn persistent_psubscribe<P, F, U>(
+        &mut self,
+        patterns: P,
+        mut func: F,
+        dur: Option<Duration>
+    ) -> RedisResult<U>
+    where
+        F: FnMut(Msg) -> ControlFlow<U>,
+        P: ToRedisArgs, 
+    {
+        // Get a slot number
+        let mut s = DefaultHasher::new();
+        let channel_vec: Vec<u8> = patterns.to_redis_args().into_iter().flatten().collect();
+        channel_vec.hash(&mut s);
+        let long = s.finish();
+        let slot: u16 = (long % 16384)
+                        .try_into()
+                        .map_err(|_| {
+                            RedisError::from((
+                                ErrorKind::ClusterDown,
+                                "Unable to find a valid slot range for given channel hash",
+                            ))})?;
+
+        let slots = self.slots.borrow();
+        let (_, slot_addrs) = slots.get_slot(slot)?;
+        let master_connection_addr = slot_addrs.slot_addr(&SlotAddr::Master);
+        let mut conn_map = self.connections.borrow_mut();
+        let conn = conn_map.get_mut(master_connection_addr).ok_or_else(|| {
+            RedisError::from((
+                ErrorKind::ClusterDown,
+                "Unable to find node connection for given slot range",
+            ))
+        })?;
+
+        conn.psubscribe(patterns, func, dur)
     }
 }
 

@@ -784,7 +784,7 @@ fn scoped_pubsub() {
                     }
                     _ => ControlFlow::Break(()),
                 }
-            })
+            }, None)
             .unwrap();
 
         pubsub_con
